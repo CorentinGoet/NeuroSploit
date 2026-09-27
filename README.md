@@ -12,7 +12,7 @@
   <img src="https://img.shields.io/badge/Harness-Rust%20%7C%20tokio-e6b673?style=flat-square">
   <img src="https://img.shields.io/badge/License-MIT-green?style=flat-square">
   <img src="https://img.shields.io/badge/MD%20Agents-458-red?style=flat-square">
-  <img src="https://img.shields.io/badge/Models-18%20providers-success?style=flat-square">
+  <img src="https://img.shields.io/badge/Models-19%20providers-success?style=flat-square">
   <img src="https://img.shields.io/badge/Modes-Black%20%7C%20White%20%7C%20Grey%20%7C%20Host%20%7C%20AI%20%7C%20Mobile%20%7C%20Container-9cf?style=flat-square">
   <img src="https://img.shields.io/badge/Auth-API%20key%20%7C%20Subscription-orange?style=flat-square">
 </p>

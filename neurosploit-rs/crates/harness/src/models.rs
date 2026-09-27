@@ -23,13 +23,13 @@ pub struct Provider {
 pub fn providers() -> Vec<Provider> {
     vec![
         Provider { key: "anthropic", label: "Anthropic Claude", base_url: "https://api.anthropic.com/v1", env_key: "ANTHROPIC_API_KEY", kind: "cli",
-            models: vec!["claude-opus-5", "claude-sonnet-5", "claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5"] },
+            models: vec!["claude-opus-5-5", "claude-opus-5", "claude-sonnet-5", "claude-fable-5-1", "claude-opus-4-8", "claude-sonnet-4-6", "claude-haiku-4-5"] },
         Provider { key: "openai", label: "OpenAI (ChatGPT)", base_url: "https://api.openai.com/v1", env_key: "OPENAI_API_KEY", kind: "cli",
-            models: vec!["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.2", "gpt-5.1", "gpt-5.1-codex", "o4"] },
+            models: vec!["gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "gpt-5.5", "gpt-5.4", "gpt-5.4-mini", "gpt-5.3-codex", "gpt-5.2", "gpt-5.1", "gpt-5.1-codex", "o4"] },
         Provider { key: "xai", label: "xAI Grok", base_url: "https://api.x.ai/v1", env_key: "XAI_API_KEY", kind: "cli",
             models: vec!["grok-4.7", "grok-4.5", "grok-4", "grok-4-fast"] },
         Provider { key: "gemini", label: "Google Gemini", base_url: "https://generativelanguage.googleapis.com/v1beta/openai", env_key: "GEMINI_API_KEY", kind: "cli",
-            models: vec!["gemini-3-pro", "gemini-2.5-pro", "gemini-2.5-flash"] },
+            models: vec!["gemini-3-pro", "gemini-3.8-flash", "gemini-2.5-pro", "gemini-2.5-flash"] },
         Provider { key: "nvidia_nim", label: "NVIDIA NIM", base_url: "https://integrate.api.nvidia.com/v1", env_key: "NVIDIA_NIM_API_KEY", kind: "api",
             models: vec!["nvidia/llama-3.3-nemotron-super-49b-v1", "deepseek-ai/deepseek-r1", "qwen/qwen2.5-coder-32b-instruct"] },
         Provider { key: "deepseek", label: "DeepSeek", base_url: "https://api.deepseek.com/v1", env_key: "DEEPSEEK_API_KEY", kind: "api",
@@ -37,7 +37,10 @@ pub fn providers() -> Vec<Provider> {
         Provider { key: "mistral", label: "Mistral", base_url: "https://api.mistral.ai/v1", env_key: "MISTRAL_API_KEY", kind: "api",
             models: vec!["mistral-large-latest", "codestral-latest"] },
         Provider { key: "qwen", label: "Qwen (DashScope)", base_url: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", env_key: "DASHSCOPE_API_KEY", kind: "api",
-            models: vec!["qwen-max", "qwen2.5-coder-32b-instruct", "qwq-plus"] },
+            models: vec!["qwen3.8-max", "qwen3.8-omni-flash", "qwen-max", "qwen2.5-coder-32b-instruct", "qwq-plus"] },
+        // Z.ai (Zhipu / GLM). OpenAI-compatible open platform endpoint.
+        Provider { key: "zai", label: "Z.ai (GLM)", base_url: "https://api.z.ai/api/paas/v4", env_key: "ZAI_API_KEY", kind: "api",
+            models: vec!["glm-5.3", "glm-5.3-flashx", "glm-4.6"] },
         Provider { key: "groq", label: "Groq", base_url: "https://api.groq.com/openai/v1", env_key: "GROQ_API_KEY", kind: "api",
             models: vec!["llama-3.3-70b-versatile", "qwen-2.5-coder-32b"] },
         Provider { key: "together", label: "Together AI", base_url: "https://api.together.xyz/v1", env_key: "TOGETHER_API_KEY", kind: "api",
@@ -51,7 +54,7 @@ pub fn providers() -> Vec<Provider> {
         Provider { key: "litellm", label: "LiteLLM (proxy)", base_url: "http://localhost:4000/v1", env_key: "LITELLM_API_KEY", kind: "api",
             models: vec!["gpt-4o", "claude-3-7-sonnet", "gemini/gemini-2.5-pro"] },
         Provider { key: "openrouter", label: "OpenRouter", base_url: "https://openrouter.ai/api/v1", env_key: "OPENROUTER_API_KEY", kind: "api",
-            models: vec!["anthropic/claude-opus-4-8", "qwen/qwen-2.5-coder-32b-instruct", "deepseek/deepseek-r1", "meta-llama/llama-3.3-70b-instruct"] },
+            models: vec!["anthropic/claude-opus-5-5", "anthropic/claude-opus-4-8", "z-ai/glm-5.3", "qwen/qwen3.8-max", "deepseek/deepseek-v4.1", "meta-llama/llama-3.3-70b-instruct"] },
         // OpenCode Zen — the curated OpenAI-compatible gateway behind the
         // `opencode` CLI (https://opencode.ai/zen). Works two ways, like
         // anthropic/openai/xai/gemini above: as a plain API-key provider here,
@@ -59,7 +62,7 @@ pub fn providers() -> Vec<Provider> {
         // `opencode` agentic CLI on the user's own Zen/plan login — no key
         // needed in that mode. `kind: "cli"` reflects the latter.
         Provider { key: "opencode", label: "OpenCode Zen", base_url: "https://opencode.ai/zen/v1", env_key: "OPENCODE_API_KEY", kind: "cli",
-            models: vec!["claude-opus-5", "claude-sonnet-5", "gpt-5.6-sol", "gpt-5.5", "gemini-3-pro", "grok-4.7", "grok-4.5", "deepseek-v4-pro", "qwen3.7-max", "kimi-k3"] },
+            models: vec!["claude-opus-5-5", "claude-opus-5", "claude-sonnet-5", "gpt-6-sol", "gpt-5.6-sol", "gpt-5.5", "gemini-3-pro", "gemini-3.8-flash", "grok-4.7", "grok-4.5", "glm-5.3", "deepseek-v4.1", "deepseek-v4-pro", "qwen3.8-max", "kimi-k3"] },
         // Nous Research — Hermes models via the Nous Portal. As an API-key
         // provider here (OpenAI-compatible `inference-api.nousresearch.com`),
         // or (with --subscription) driven through the `hermes` CLI
