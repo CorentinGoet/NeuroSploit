@@ -2458,11 +2458,11 @@ async function renderDashboard() {
         <div class="fair-contrib">
           <div class="dash-sub">Top contributors (most likely annual loss)</div>
           ${contributors.map(({ f, ml }) => `
-            <div class="contrib-row" title="${esc(f.title)} — ${esc(f.target)}">
+            <button class="contrib-row contrib-click" data-run="${esc(f.runId || '')}" data-title="${esc(f.title || '')}" data-cwe="${esc(f.cwe || '')}" title="Open this finding — ${esc(f.title)} (${esc(f.target)})">
               <span class="sev ${sevClass(f.severity)}">${esc(f.severity)}</span>
               <span class="contrib-title">${esc(f.title || f.cwe || 'untitled')}</span>
               <span class="contrib-v">${money(ml)}</span>
-            </div>`).join('') || '<div class="field-help">No findings in range.</div>'}
+            </button>`).join('') || '<div class="field-help">No findings in range.</div>'}
         </div>
       </section>
 
@@ -2506,6 +2506,36 @@ async function renderDashboard() {
     $('#runFilter').value = tr.dataset.target;
     renderSidebar();
   }));
+  // A top contributor is a specific finding in a specific run — clicking it
+  // opens that run and pops the finding's full detail (evidence/impact/PoC),
+  // so "what is this loss" is one click, not a hunt through run history.
+  $$('#dashBody .contrib-click').forEach((row) => row.addEventListener('click', () =>
+    openContributorFinding(row.dataset.run, row.dataset.title, row.dataset.cwe)));
+}
+
+/// Open the run a dashboard contributor belongs to and surface that exact
+/// finding. The dashboard row carries only (runId, title, cwe) — the full
+/// finding lives in the run detail — so we load the run, then match by title
+/// (falling back to CWE) and open its modal.
+async function openContributorFinding(runId, title, cwe) {
+  if (!runId) return;
+  const run = (state.runs || []).find((r) => r.id === runId) || { id: runId, state: 'complete' };
+  // Switch to the run's detail view (this also refreshes the tables), and in
+  // parallel fetch the detail directly so we match the finding without racing
+  // loadDetail's own async fill of state.detailFindings.
+  openRun(run);
+  let detail;
+  try { detail = await api(`/api/runs/${encodeURIComponent(runId)}`); }
+  catch { return; }
+  const fs = detail.findings || [];
+  const norm = (s) => String(s || '').trim().toLowerCase();
+  let f = fs.find((x) => norm(x.title) === norm(title));
+  if (!f && cwe) f = fs.find((x) => norm(x.cwe) === norm(cwe));
+  if (f) {
+    openFindingModal(f, detail.pocs || [], runId);
+  } else {
+    toast('Opened the run — this finding was recalibrated or merged, so its row may differ.', 'warn', 6000);
+  }
 }
 
 /// The assumptions panel. FAIR without visible inputs is a magic number; with
