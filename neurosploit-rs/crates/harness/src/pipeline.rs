@@ -1552,17 +1552,13 @@ async fn chain_from_seed(pool: &ModelPool, target: &str, directives: &str, recon
 /// Parse a chain agent reply into (new findings, loot). Accepts the object form
 /// `{"findings":[...],"loot":[...]}` and falls back to a bare findings array.
 fn extract_chain(text: &str, agent: &str) -> (Vec<Finding>, Vec<String>) {
-    if let (Some(a), Some(b)) = (text.find('{'), text.rfind('}')) {
-        if b > a {
-            if let Ok(serde_json::Value::Object(o)) = serde_json::from_str::<serde_json::Value>(&text[a..=b]) {
-                if o.contains_key("findings") {
-                    let findings = o.get("findings").map(|v| extract_findings(&v.to_string(), agent)).unwrap_or_default();
-                    let loot = o.get("loot").and_then(|v| v.as_array())
-                        .map(|arr| arr.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
-                        .unwrap_or_default();
-                    return (findings, loot);
-                }
-            }
+    if let Some(serde_json::Value::Object(o)) = crate::json_extract::parse_reply(text) {
+        if o.contains_key("findings") {
+            let findings = o.get("findings").map(|v| extract_findings(&v.to_string(), agent)).unwrap_or_default();
+            let loot = o.get("loot").and_then(|v| v.as_array())
+                .map(|arr| arr.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
+                .unwrap_or_default();
+            return (findings, loot);
         }
     }
     (extract_findings(text, agent), vec![])
@@ -1669,8 +1665,10 @@ async fn typesafe_prune_agents(recon: &str, catalog: &[Agent], chosen: Vec<Strin
 }
 
 fn parse_string_array(text: &str) -> Vec<String> {
-    match (text.find('['), text.rfind(']')) {
-        (Some(a), Some(b)) if b > a => serde_json::from_str::<Vec<String>>(&text[a..=b]).unwrap_or_default(),
+    match crate::json_extract::parse_reply(text) {
+        Some(serde_json::Value::Array(a)) => {
+            a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()
+        }
         _ => vec![],
     }
 }
@@ -2861,96 +2859,51 @@ fn transcript_of(raw: &[(String, String, Vec<Finding>)]) -> String {
 /// Accepts a bare `[]`, a fenced ```json block containing one, and the common
 /// `{"findings": []}` wrapper — all three mean "I looked and found nothing".
 fn reported_nothing(text: &str) -> bool {
-    let mut t = text.trim();
-    // Take the last fenced block when there is one; models narrate first and
-    // put the machine-readable answer at the end.
-    if let Some(start) = t.rfind("```") {
-        if let Some(open) = t[..start].rfind("```") {
-            let inner = &t[open + 3..start];
-            let inner = inner.strip_prefix("json").unwrap_or(inner);
-            t = inner.trim();
-        }
-    }
-    let t = t.trim_start_matches("```json").trim_start_matches("```").trim_end_matches("```").trim();
-    if t == "[]" {
+    if text.trim() == "[]" {
         return true;
     }
-    serde_json::from_str::<serde_json::Value>(t)
-        .map(|v| match &v {
-            serde_json::Value::Array(a) => a.is_empty(),
-            serde_json::Value::Object(o) => o.get("findings").and_then(|f| f.as_array()).map(|a| a.is_empty()).unwrap_or(false),
-            _ => false,
-        })
-        .unwrap_or(false)
+    // Same lenient extractor the finding parser uses, so "nothing found" and
+    // "here are the findings" are decided from the exact same value — they can
+    // never disagree about which region of the reply is the answer.
+    match crate::json_extract::parse_reply(text) {
+        Some(serde_json::Value::Array(a)) => a.is_empty(),
+        Some(serde_json::Value::Object(o)) => o
+            .get("findings")
+            .and_then(|f| f.as_array())
+            .map(|a| a.is_empty())
+            .unwrap_or(false),
+        _ => false,
+    }
 }
 
-/// Every ```fenced``` block in the text, in order.
-fn fenced_blocks(text: &str) -> Vec<&str> {
-    let mut out = Vec::new();
-    let mut rest = text;
-    while let Some(open) = rest.find("```") {
-        let after = &rest[open + 3..];
-        let Some(close) = after.find("```") else { break };
-        let inner = &after[..close];
-        let inner = inner.strip_prefix("json").unwrap_or(inner);
-        out.push(inner.trim());
-        rest = &after[close + 3..];
-    }
-    out
+/// Last `n` characters of `s`, on a char boundary (diagnostics only).
+fn tail(s: &str, n: usize) -> String {
+    let total = s.chars().count();
+    s.chars().skip(total.saturating_sub(n)).collect()
 }
 
 /// Pull the findings array out of a model's reply.
 ///
-/// The naive "first `[` to last `]`" span is wrong whenever the agent narrates
-/// before answering: a real reply here opened with the prose line
-/// `[low] Antiforgery cookie missing Secure flag`, so the span started inside
-/// prose, failed to parse, and the agent's actual findings were thrown away.
-/// Fenced blocks are tried first (last one wins — models narrate, then answer),
-/// and the span is only a fallback.
+/// Locating and parsing the JSON is delegated to [`crate::json_extract`], which
+/// is string-aware (prose brackets like `[low] …` no longer start the span),
+/// prefers the last fenced block, and tolerates the deviations that used to sink
+/// a whole batch — fenced/capitalised tags, trailing commas, comments, single
+/// quotes, and replies truncated by a token limit. The two failures seen on live
+/// runs (`JSON parse failed` and `no JSON array/object found`) now collapse into
+/// one honest outcome: either we recover a value, or the reply held no JSON.
 fn extract_findings(text: &str, agent: &str) -> Vec<Finding> {
-    let mut candidates: Vec<String> = Vec::new();
-    for b in fenced_blocks(text).into_iter().rev() {
-        if b.starts_with('[') || b.starts_with('{') {
-            candidates.push(b.to_string());
-        }
-    }
-    if let (Some(a), Some(b)) = (text.find('['), text.rfind(']')) {
-        if b > a {
-            candidates.push(text[a..=b].to_string());
-        }
-    }
-    if let (Some(a), Some(b)) = (text.find('{'), text.rfind('}')) {
-        if b > a {
-            candidates.push(text[a..=b].to_string());
-        }
-    }
-    let slice: String = match candidates.iter().find(|c| serde_json::from_str::<serde_json::Value>(c).is_ok()).cloned() {
-        Some(good) => good,
-        None => match candidates.into_iter().next() {
-            // Nothing parsed: keep the best guess so the salvage pass below
-            // still gets a shot at a trailing-comma mistake.
-            Some(first) => first,
-            None => {
-                if !text.trim().is_empty() && text.trim() != "[]" {
-                    eprintln!("[extract_findings] agent {agent}: model returned text but no JSON array/object found (len={}); raw tail: {:?}",
-                        text.len(), &text[text.len().saturating_sub(200)..]);
-                }
-                return vec![];
+    let val = match crate::json_extract::parse_reply(text) {
+        Some(v) => v,
+        None => {
+            let t = text.trim();
+            if !t.is_empty() && t != "[]" {
+                eprintln!(
+                    "[extract_findings] agent {agent}: no parseable JSON in model reply (len={}); raw tail: {:?}",
+                    text.len(),
+                    tail(text, 200)
+                );
             }
-        },
-    };
-    let slice: &str = &slice;
-    let val: serde_json::Value = match serde_json::from_str(slice) {
-        Ok(v) => v,
-        Err(e) => {
-            eprintln!("[extract_findings] agent {agent}: JSON parse failed: {e}; slice head: {:?}",
-                &slice[..slice.len().min(300)]);
-            // Attempt to salvage: strip trailing comma before ] (common LLM mistake)
-            let fixed = slice.replace(",]", "]").replace(",}", "}");
-            match serde_json::from_str(&fixed) {
-                Ok(v) => v,
-                Err(_) => return vec![],
-            }
+            return vec![];
         }
     };
     let items: Vec<serde_json::Value> = match val {
@@ -4016,6 +3969,41 @@ mod extraction_tests {
     fn a_trailing_comma_is_still_salvaged() {
         let f = extract_findings("```json\n[{\"title\":\"X\",\"severity\":\"Low\"},]\n```", "a");
         assert_eq!(f.len(), 1);
+    }
+
+    /// `JSON parse failed` on a live run: single-quoted keys/values and a `//`
+    /// comment — none of which strict serde accepts, all of which json5 does.
+    #[test]
+    fn single_quotes_and_comments_are_recovered() {
+        let f = extract_findings("```json\n[ {'title': 'Reflected XSS', 'severity': 'High'} ] // done\n```", "a");
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].title, "Reflected XSS");
+    }
+
+    /// A capitalised fence tag used to fail the old `starts_with('[')` gate and
+    /// surface as `no JSON array/object found`.
+    #[test]
+    fn a_capitalised_fence_tag_is_handled() {
+        let f = extract_findings("```JSON\n[{\"title\":\"Open redirect\",\"severity\":\"Medium\"}]\n```", "a");
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].title, "Open redirect");
+    }
+
+    /// Token-limit truncation mid-way through the third finding: the two complete
+    /// ones must survive instead of the whole batch being discarded.
+    #[test]
+    fn a_truncated_array_keeps_the_complete_findings() {
+        let text = "[{\"title\":\"A\",\"severity\":\"Low\"},{\"title\":\"B\",\"severity\":\"Low\"},{\"title\":\"C";
+        let f = extract_findings(text, "a");
+        assert_eq!(f.len(), 2);
+        assert_eq!(f[1].title, "B");
+    }
+
+    /// Pure prose (a refusal or narration with no JSON) is not a finding and not
+    /// a parse error — it yields nothing.
+    #[test]
+    fn pure_prose_yields_no_findings() {
+        assert!(extract_findings("I could not identify any injectable parameters.", "a").is_empty());
     }
 }
 
