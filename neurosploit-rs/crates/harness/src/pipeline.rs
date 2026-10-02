@@ -1553,8 +1553,11 @@ async fn chain_from_seed(pool: &ModelPool, target: &str, directives: &str, recon
 /// `{"findings":[...],"loot":[...]}` and falls back to a bare findings array.
 fn extract_chain(text: &str, agent: &str) -> (Vec<Finding>, Vec<String>) {
     if let Some(serde_json::Value::Object(o)) = crate::json_extract::parse_reply(text) {
-        if o.contains_key("findings") {
-            let findings = o.get("findings").map(|v| extract_findings(&v.to_string(), agent)).unwrap_or_default();
+        // A chain reply wrapping its findings array (under any of the keys models
+        // use, not just "findings") also carries `loot` as a sibling — pull both.
+        let findings_arr = FINDINGS_WRAPPER_KEYS.iter().find_map(|k| o.get(*k));
+        if findings_arr.is_some() {
+            let findings = findings_arr.map(|v| extract_findings(&v.to_string(), agent)).unwrap_or_default();
             let loot = o.get("loot").and_then(|v| v.as_array())
                 .map(|arr| arr.iter().filter_map(|x| x.as_str().map(|s| s.to_string())).collect())
                 .unwrap_or_default();
@@ -1664,13 +1667,47 @@ async fn typesafe_prune_agents(recon: &str, catalog: &[Agent], chosen: Vec<Strin
     }
 }
 
+/// Keys a model wraps a names/strings array under when it returns an object
+/// instead of the bare array we asked for — `{"agents":[…]}`, `{"selected":[…]}`.
+/// Same deviation as [`FINDINGS_WRAPPER_KEYS`], seen on the agent-selection reply;
+/// without unwrapping, a wrapped selection reads as empty and the run silently
+/// falls back to RL ranking.
+const STRING_ARRAY_WRAPPER_KEYS: &[&str] =
+    &["agents", "selected", "selection", "names", "agent_names", "chosen", "list", "items"];
+
+/// Fields that carry the string inside an array element that is an *object*
+/// (`[{"name":"sqli"}]`) rather than a bare string (`["sqli"]`).
+const STRING_ELEMENT_KEYS: &[&str] = &["name", "agent", "id", "value"];
+
+/// Pull a list of strings out of a model reply, tolerating the shapes models use
+/// when they stray from "reply with a JSON array of strings": a wrapper object
+/// around the array, and array elements that are objects carrying the string in a
+/// `name`/`agent`/`id` field.
 fn parse_string_array(text: &str) -> Vec<String> {
-    match crate::json_extract::parse_reply(text) {
-        Some(serde_json::Value::Array(a)) => {
-            a.iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect()
+    let arr = match crate::json_extract::parse_reply(text) {
+        Some(serde_json::Value::Array(a)) => a,
+        Some(serde_json::Value::Object(o)) => {
+            match STRING_ARRAY_WRAPPER_KEYS
+                .iter()
+                .find_map(|k| o.get(*k).and_then(|v| v.as_array()))
+            {
+                Some(a) => a.clone(),
+                None => return vec![],
+            }
         }
-        _ => vec![],
-    }
+        _ => return vec![],
+    };
+    arr.iter()
+        .filter_map(|v| match v {
+            serde_json::Value::String(s) => Some(s.trim().to_string()),
+            serde_json::Value::Object(o) => STRING_ELEMENT_KEYS
+                .iter()
+                .find_map(|k| o.get(*k).and_then(|x| x.as_str()))
+                .map(|s| s.trim().to_string()),
+            _ => None,
+        })
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 /// Fallback agent selection when the LLM selector fails: score each agent by
@@ -2856,8 +2893,9 @@ fn transcript_of(raw: &[(String, String, Vec<Finding>)]) -> String {
 /// so we parse leniently into `Value` and coerce every field.
 /// Did the agent explicitly report an empty result?
 ///
-/// Accepts a bare `[]`, a fenced ```json block containing one, and the common
-/// `{"findings": []}` wrapper — all three mean "I looked and found nothing".
+/// Accepts a bare `[]`, a fenced ```json block containing one, and an empty
+/// findings wrapper (`{"findings":[]}`, `{"vulnerabilities":[]}`, … — see
+/// [`FINDINGS_WRAPPER_KEYS`]) — all mean "I looked and found nothing".
 fn reported_nothing(text: &str) -> bool {
     if text.trim() == "[]" {
         return true;
@@ -2867,9 +2905,9 @@ fn reported_nothing(text: &str) -> bool {
     // never disagree about which region of the reply is the answer.
     match crate::json_extract::parse_reply(text) {
         Some(serde_json::Value::Array(a)) => a.is_empty(),
-        Some(serde_json::Value::Object(o)) => o
-            .get("findings")
-            .and_then(|f| f.as_array())
+        Some(serde_json::Value::Object(o)) => FINDINGS_WRAPPER_KEYS
+            .iter()
+            .find_map(|k| o.get(*k).and_then(|f| f.as_array()))
             .map(|a| a.is_empty())
             .unwrap_or(false),
         _ => false,
@@ -2882,6 +2920,46 @@ fn tail(s: &str, n: usize) -> String {
     s.chars().skip(total.saturating_sub(n)).collect()
 }
 
+/// Keys a model wraps its findings array under when it ignores "reply with ONLY
+/// a JSON array" and returns an object instead — `{"findings":[…]}`,
+/// `{"vulnerabilities":[…]}`, etc. Seen most on black-box runs, where the reply
+/// follows a long tool-use turn and the model narrates into a report object. None
+/// of these names collide with a finding's own fields, so unwrapping is safe.
+const FINDINGS_WRAPPER_KEYS: &[&str] =
+    &["findings", "vulnerabilities", "vulns", "results", "issues"];
+
+/// Normalise a parsed reply into the list of candidate finding objects.
+///
+/// - An array *is* the list.
+/// - An object carrying a non-empty `title` is a single bare finding object.
+/// - Otherwise an object wrapping one of [`FINDINGS_WRAPPER_KEYS`] unwraps to that
+///   array — without this a real batch returned as `{"findings":[…]}` is treated
+///   as one title-less "finding", dropped, and surfaces to the operator as
+///   "returned text but 0 parseable findings" while the findings are lost.
+/// - Any other object is passed through as a single finding object (so a bare
+///   finding using a non-standard title key still reaches the field coercion).
+fn findings_items(val: serde_json::Value) -> Vec<serde_json::Value> {
+    match val {
+        serde_json::Value::Array(a) => a,
+        serde_json::Value::Object(o) => {
+            let has_title = o
+                .get("title")
+                .and_then(|v| v.as_str())
+                .map(|t| !t.trim().is_empty())
+                .unwrap_or(false);
+            if !has_title {
+                for k in FINDINGS_WRAPPER_KEYS {
+                    if let Some(serde_json::Value::Array(a)) = o.get(*k) {
+                        return a.clone();
+                    }
+                }
+            }
+            vec![serde_json::Value::Object(o)]
+        }
+        _ => vec![],
+    }
+}
+
 /// Pull the findings array out of a model's reply.
 ///
 /// Locating and parsing the JSON is delegated to [`crate::json_extract`], which
@@ -2891,6 +2969,7 @@ fn tail(s: &str, n: usize) -> String {
 /// quotes, and replies truncated by a token limit. The two failures seen on live
 /// runs (`JSON parse failed` and `no JSON array/object found`) now collapse into
 /// one honest outcome: either we recover a value, or the reply held no JSON.
+/// The recovered value's *shape* is then normalised by [`findings_items`].
 fn extract_findings(text: &str, agent: &str) -> Vec<Finding> {
     let val = match crate::json_extract::parse_reply(text) {
         Some(v) => v,
@@ -2906,12 +2985,7 @@ fn extract_findings(text: &str, agent: &str) -> Vec<Finding> {
             return vec![];
         }
     };
-    let items: Vec<serde_json::Value> = match val {
-        serde_json::Value::Array(a) => a,
-        serde_json::Value::Object(_) => vec![val],
-        _ => return vec![],
-    };
-    items
+    findings_items(val)
         .into_iter()
         .filter_map(|it| {
             let o = it.as_object()?;
@@ -4004,6 +4078,77 @@ mod extraction_tests {
     #[test]
     fn pure_prose_yields_no_findings() {
         assert!(extract_findings("I could not identify any injectable parameters.", "a").is_empty());
+    }
+
+    /// Black-box models often ignore "reply with ONLY a JSON array" and wrap the
+    /// batch in `{"findings":[…]}`. That object has no `title`, so the old
+    /// object-as-one-finding path dropped it and reported "0 parseable findings"
+    /// while real findings were lost. It must now unwrap to its array.
+    #[test]
+    fn a_findings_wrapper_object_is_unwrapped() {
+        let text = "```json\n{\"findings\":[{\"title\":\"IDOR on /orders\",\"severity\":\"High\"},{\"title\":\"Reflected XSS\",\"severity\":\"Medium\"}]}\n```";
+        let f = extract_findings(text, "a");
+        assert_eq!(f.len(), 2);
+        assert_eq!(f[0].title, "IDOR on /orders");
+    }
+
+    /// Alternate wrapper keys models use for the same shape.
+    #[test]
+    fn a_vulnerabilities_wrapper_object_is_unwrapped() {
+        let f = extract_findings("{\"vulnerabilities\":[{\"title\":\"SQLi\",\"severity\":\"Critical\"}]}", "a");
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].title, "SQLi");
+    }
+
+    /// A single bare finding object (with its own `title`) is still one finding —
+    /// unwrapping must not steal a nested array it happens to carry.
+    #[test]
+    fn a_bare_finding_object_stays_one_finding() {
+        let f = extract_findings("{\"title\":\"Open redirect\",\"severity\":\"Low\",\"repro_steps\":[\"curl …\"]}", "a");
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].title, "Open redirect");
+    }
+
+    /// An empty wrapper is an honest negative, not a malformed reply.
+    #[test]
+    fn an_empty_wrapper_is_reported_nothing_not_a_parse_failure() {
+        assert!(reported_nothing("{\"findings\":[]}"));
+        assert!(reported_nothing("```json\n{\"vulnerabilities\": []}\n```"));
+        assert!(extract_findings("{\"findings\":[]}", "a").is_empty());
+    }
+
+    /// The bare-array happy path for agent selection.
+    #[test]
+    fn a_string_array_parses_plain() {
+        assert_eq!(parse_string_array("[\"sqli\",\"xss\"]"), vec!["sqli", "xss"]);
+    }
+
+    /// Same wrapper-object deviation as findings: `{"agents":[…]}` must not read as
+    /// an empty selection (which silently drops the model's choice to RL ranking).
+    #[test]
+    fn a_wrapped_string_array_is_unwrapped() {
+        assert_eq!(parse_string_array("{\"agents\":[\"sqli\",\"idor\"]}"), vec!["sqli", "idor"]);
+        assert_eq!(parse_string_array("```json\n{\"selected\": [\"ssrf\"]}\n```"), vec!["ssrf"]);
+    }
+
+    /// Models sometimes answer with objects per element instead of bare strings.
+    #[test]
+    fn array_elements_that_are_objects_yield_their_name() {
+        assert_eq!(
+            parse_string_array("[{\"name\":\"sqli\",\"why\":\"x\"},{\"agent\":\"xss\"}]"),
+            vec!["sqli", "xss"]
+        );
+    }
+
+    /// A chain reply wrapping findings under a non-`findings` key still yields both
+    /// the findings and the sibling loot.
+    #[test]
+    fn extract_chain_unwraps_any_findings_key_with_loot() {
+        let text = "{\"vulnerabilities\":[{\"title\":\"RCE\",\"severity\":\"Critical\"}],\"loot\":[\"root creds\"]}";
+        let (f, loot) = extract_chain(text, "chain");
+        assert_eq!(f.len(), 1);
+        assert_eq!(f[0].title, "RCE");
+        assert_eq!(loot, vec!["root creds"]);
     }
 }
 
